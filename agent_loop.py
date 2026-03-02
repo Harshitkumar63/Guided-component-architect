@@ -25,11 +25,11 @@ All diagnostic output goes to stderr; only the final component code goes to stdo
 
 from __future__ import annotations
 
-import sys
-from typing import Dict, List, Optional
+from typing import Dict
 
 from generator import generate_component, load_design_system, regenerate_component
-from validator import validate_component
+from logger import log_error, log_info, log_lines, log_warn
+from validator import validate
 
 # Maximum number of LLM self-correction attempts after the initial generation.
 MAX_RETRIES: int = 2
@@ -63,29 +63,32 @@ def run_agent_loop(
     """
     tokens: Dict[str, str] = load_design_system()
 
-    #  Step 1: Initial generation 
-    _log(verbose, " Generating initial component...")
+    log_info("Generation start: creating initial component.", verbose=verbose)
     code: str = generate_component(description, tokens=tokens, model=model)
-    _log(verbose, " Initial generation complete.")
+    log_info("Initial generation complete.", verbose=verbose)
 
-    #  Step 2: First validation pass 
-    _log(verbose, " Running design-system validation...")
-    report: Dict = validate_component(code, tokens)
+    log_info("Running validation pass 1.", verbose=verbose)
+    report = validate(code, tokens)
 
     if report["is_valid"]:
-        _log_warnings(verbose, report["warnings"])
-        _log(verbose, " Component passed all validation checks on first attempt.")
+        if report["warnings"]:
+            log_lines(report["warnings"], prefix="WARN ", verbose=verbose)
+        log_info("Final success: component passed validation on first attempt.", verbose=verbose)
         return code
 
-    # Validation failed — log the errors
-    _log(verbose, f"  Validation found {len(report['errors'])} error(s) on first attempt:")
-    _log_errors(verbose, report["errors"])
+    log_warn(
+        f"Validation failed on first attempt with {len(report['errors'])} error(s).",
+        verbose=verbose,
+    )
+    log_lines(report["errors"], prefix="ERROR", verbose=verbose)
     if report["warnings"]:
-        _log_warnings(verbose, report["warnings"])
+        log_lines(report["warnings"], prefix="WARN ", verbose=verbose)
 
-    #  Steps 3–4: Self-correction retry loop 
     for attempt in range(1, max_retries + 1):
-        _log(verbose, f" Retry {attempt}/{max_retries} — sending errors to LLM for self-correction...")
+        log_info(
+            f"Retry {attempt}/{max_retries}: requesting self-correction.",
+            verbose=verbose,
+        )
 
         code = regenerate_component(
             original_code=code,
@@ -94,51 +97,28 @@ def run_agent_loop(
             tokens=tokens,
             model=model,
         )
-        _log(verbose, f" Retry {attempt} generation complete.")
-        _log(verbose, f" Re-validating after retry {attempt}...")
+        log_info(f"Retry {attempt} generation complete.", verbose=verbose)
+        log_info(f"Running validation pass retry-{attempt}.", verbose=verbose)
 
-        report = validate_component(code, tokens)
+        report = validate(code, tokens)
 
         if report["is_valid"]:
-            _log_warnings(verbose, report["warnings"])
-            _log(verbose, f" Component passed all checks after retry {attempt}.")
+            if report["warnings"]:
+                log_lines(report["warnings"], prefix="WARN ", verbose=verbose)
+            log_info(f"Final success: component passed after retry {attempt}.", verbose=verbose)
             return code
 
-        _log(verbose, f"  Still {len(report['errors'])} error(s) after retry {attempt}:")
-        _log_errors(verbose, report["errors"])
+        log_warn(
+            f"Validation failed after retry {attempt} with {len(report['errors'])} error(s).",
+            verbose=verbose,
+        )
+        log_lines(report["errors"], prefix="ERROR", verbose=verbose)
         if report["warnings"]:
-            _log_warnings(verbose, report["warnings"])
+            log_lines(report["warnings"], prefix="WARN ", verbose=verbose)
 
-    #  Step 5: Retries exhausted — return best-effort output 
-    _log(
-        verbose,
-        f" Max retries ({max_retries}) exhausted. Returning best-effort output.\n"
-        f"   Unresolved errors: {report['errors']}",
+    log_error(
+        f"Retries exhausted ({max_retries}). Returning best-effort output.",
+        verbose=verbose,
     )
+    log_lines(report["errors"], prefix="ERROR", verbose=verbose)
     return code
-
-
-# 
-# Internal logging helpers
-# 
-
-def _log(verbose: bool, message: str) -> None:
-    """Print a diagnostic message to stderr (keeps stdout clean for piped code)."""
-    if verbose:
-        print(message, file=sys.stderr)
-
-
-def _log_errors(verbose: bool, errors: List[str]) -> None:
-    """Pretty-print hard validation errors to stderr."""
-    if not verbose:
-        return
-    for err in errors:
-        print(f"    {err}", file=sys.stderr)
-
-
-def _log_warnings(verbose: bool, warnings: List[str]) -> None:
-    """Pretty-print soft validation warnings to stderr."""
-    if not verbose or not warnings:
-        return
-    for warn in warnings:
-        print(f"    {warn}", file=sys.stderr)
